@@ -1,0 +1,6 @@
+torch
+vllm
+transformers
+numpy
+omegaconf
+datasets
