@@ -5,3 +5,4 @@ numpy<=2.2 # vllm fails for numpy >= 2.3 on B200s
 omegaconf
 datasets
 flashinfer-python # optional, for faster vLLM sampling
+bayesian-changepoint-detection # for branching paths!

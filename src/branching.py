@@ -1,10 +1,9 @@
 from dataclasses import dataclass
-import logging
 import os
 from pathlib import Path
-import sys
 import numpy as np
-from simple_data import MinervaMath, Instance
+from dataset.simple_data import MinervaMath
+from dataset.simple_metric import Instance
 import torch
 from typing import List, Dict, Any
 from tqdm import tqdm
@@ -13,6 +12,7 @@ from datetime import datetime
 from omegaconf import OmegaConf
 from rich import print as rprint
 from rich.pretty import pprint
+from utils import apply_overrides, quiet_vllm_logger
 
 from vllm import LLM, CompletionOutput, RequestOutput, SamplingParams
 from transformers import AutoTokenizer
@@ -255,25 +255,6 @@ def create_math_prompts() -> List[str]:
     instances: List[Instance] = dataset.requests
     requests: List[str] = [instance.request for instance in instances]
     return requests
-
-
-def apply_overrides(config):
-    base = OmegaConf.structured(config)
-    
-    # Get CLI args up to '--' if present, otherwise all args
-    args = sys.argv[1:sys.argv.index("--")] if "--" in sys.argv else sys.argv[1:]
-    cli_args = [arg.lstrip("-") for arg in args]
-    
-    # Merge overrides
-    overrides = OmegaConf.from_cli(cli_args)
-    merged = OmegaConf.merge(base, overrides)
-    return OmegaConf.to_object(merged)
-
-
-def quiet_vllm_logger(level=logging.WARNING):
-    for name, logger in logging.root.manager.loggerDict.items():
-        if name.startswith("vllm"):
-            logging.getLogger(name).setLevel(level)
 
 
 def main():

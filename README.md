@@ -65,3 +65,11 @@ python branching.py \
     --top_p 0.95 \
     --output_dir "./my_results"
 ```
+
+### Forking Paths
+
+Also working on a reproduction of [Forking Paths in Neural Text Generation](https://arxiv.org/abs/2412.07961) (Bigelow et al., 2024).
+
+```sh
+python src/forking_paths.py --model=Qwen/Qwen3-0.6B
+```

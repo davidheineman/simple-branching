@@ -1,15 +1,9 @@
-from dataclasses import dataclass, field
-from typing import Optional
+# https://github.com/davidheineman/simple-grpo/blob/main/simple_grpo/simple_data.py
+
 from datasets import load_dataset
 
-# from simple_grpo.math_extract import extract_answer
-
-@dataclass
-class Instance:
-    request: str
-    gold_completion: Optional[str] = None
-    solution: Optional[str] = None
-    metadata: dict = field(default_factory=dict)
+from dataset.math_extract import extract_answer
+from dataset.simple_metric import Instance
 
 
 class MinervaMath:
@@ -31,13 +25,13 @@ class MinervaMath:
         self.requests = list(map(self._process_instance, self.dataset))
 
     def _process_instance(self, doc) -> Instance:
-        # solution = extract_answer(doc["solution"])[0]  # get primary extracted answer
+        solution = extract_answer(doc["solution"])[0]  # get primary extracted answer
 
         query = "Problem:\n" + doc["problem"] + "\n\nSolution:"
 
         return Instance(
             request=query,
             gold_completion=doc["solution"],
-            # solution=solution,
+            solution=solution,
             metadata={"level": doc.get("level"), "type": doc.get("type")},
         )
