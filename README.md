@@ -18,7 +18,13 @@ Let's try it with the default config:
 ```sh
 # quickly check everything is working
 python src/branching.py --model=Qwen/Qwen3-0.6B --num_samples=2 --max_tokens=128
+```
 
+### Demo: Llama 3 8B
+
+We can now try compute BF on a pair of base/instruction tuned models:
+
+```sh
 # demo: computes branching factor over Minerva MATH Algebra for Llama 3 8B
 # (< 20 min on 1 A100)
 python src/branching.py --model=meta-llama/Meta-Llama-3-8B
@@ -59,7 +65,3 @@ python branching.py \
     --top_p 0.95 \
     --output_dir "./my_results"
 ```
-
-### My thoughts
-
-Could we run on intermediate checkpoints during RL training? What if we increased temperature during training to offset the reduction in branching factor. That is, we *try* to shrink the generative horizon by intentionally increasing temp.
