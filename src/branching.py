@@ -6,7 +6,7 @@ import sys
 import numpy as np
 from simple_data import MinervaMath, Instance
 import torch
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from tqdm import tqdm
 import json
 from datetime import datetime
@@ -14,10 +14,10 @@ from omegaconf import OmegaConf
 from rich import print as rprint
 from rich.pretty import pprint
 
-from vllm import LLM, RequestOutput, SamplingParams
+from vllm import LLM, CompletionOutput, RequestOutput, SamplingParams
 from transformers import AutoTokenizer
-from uncertainty_computation import compute_bf_values
-from loglik_computation import get_tokenwise_entropy_from_vllm_outputs
+from uncertainty import compute_bf_values
+from logprob_utils import get_token_level_entropy_truncated, get_token_level_entropy
 
 
 RESULTS_DIR = Path(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
@@ -40,20 +40,20 @@ class RunConfig:
 class BranchingFactorPipeline:
     def __init__(self, config: RunConfig):
         self.config: RunConfig = config
-        self.model_name = config.model
-        self.gpu_memory_utilization = config.gpu_memory_utilization
-        self.tokenizer = None
-        self.llm = None
 
-    def setup_model(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(self.config.model)
         
         # run on all available gpus
         num_gpus = torch.cuda.device_count()
 
-        self.llm = LLM(
-            model=self.model_name,
-            gpu_memory_utilization=self.gpu_memory_utilization,
+        # set cuda architecutre (avoids warning)
+        capability = torch.cuda.get_device_capability()
+        arch_str = f"{capability[0]}.{capability[1]}"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = arch_str
+
+        self.llm: LLM = LLM(
+            model=self.config.model,
+            gpu_memory_utilization=self.config.gpu_memory_utilization,
             tensor_parallel_size=num_gpus if num_gpus > 0 else 1,
             enable_chunked_prefill=True,
         )
@@ -74,71 +74,43 @@ class BranchingFactorPipeline:
         outputs = self.llm.generate(prompts, sampling_params)
         return outputs
 
-    def compute_entropy_profiles(self, outputs: list[RequestOutput], top_p: float) -> Dict[str, List]:
+    def compute_per_token_entropy(self, outputs: list[RequestOutput], top_p: float) -> Dict[str, List]:
         """ Convert vLLM outputs to token-level entropy scores """
         
         generation_info = []
-        entropy_profiles = []
+        output_entropy_truncated = []
         output_per_token_logprob_truncated = []
         for output in tqdm(outputs, desc="Calculating token-level entropy"):
             prompt = output.prompt
-            all_outputs = output.outputs
-            all_output_texts = [x.text.strip() for x in all_outputs]
+            all_outputs: List[CompletionOutput] = output.outputs
+            all_output_texts: List[str] = [x.text.strip() for x in all_outputs]
+
+            token_ids = [output.token_ids for output in all_outputs]
+            token_texts = [self.tokenizer.convert_ids_to_tokens(x) for x in token_ids]
 
             # Step 1
-            entropy_profile = get_tokenwise_entropy_from_vllm_outputs(
+            entropies, _ = get_token_level_entropy_truncated(
                 all_outputs, p=top_p, top_p_mode=True
             )
 
-            entropies = [tok_entropy for tok_entropy, tok_id in entropy_profile]
-            token_ids = [tok_id for tok_entropy, tok_id in entropy_profile]
-            token_texts = [self.tokenizer.convert_ids_to_tokens(x) for x in token_ids]
-
             # Step 2
-            per_output_logprobs = []
-            per_output_logprobs_truncated = []
-            per_output_entropies = []            
-            for single_output in all_outputs:
-                if not single_output.logprobs:
-                    raise AssertionError("logprobs must exist!")
-                
-                logprobs = []
-                logprobs_truncated = []
-                entropy_vals = []
+            per_token_logprobs, per_token_logprobs_truncated, _ = get_token_level_entropy(
+                all_outputs
+            )
 
-                for token_logprob in single_output.logprobs:
-                    if token_logprob:
-                        top_token_logprob = list(token_logprob.values())[0].logprob
-                        logprobs.append(top_token_logprob)
+            output_entropy_truncated.append(entropies)
+            output_per_token_logprob_truncated.append(per_token_logprobs_truncated)
 
-                        if top_token_logprob != 0.0:
-                            logprobs_truncated.append(top_token_logprob)
-
-                        token_probs = [
-                            (token_id, logprob_info.logprob)
-                            for token_id, logprob_info in token_logprob.items()
-                        ]
-                        entropy = -sum(
-                            np.exp(logprob) * logprob for _, logprob in token_probs
-                        )
-                        entropy_vals.append(entropy)
-
-                per_output_logprobs.append(logprobs)
-                per_output_logprobs_truncated.append(logprobs_truncated)
-                per_output_entropies.append(entropy_vals)
-
-            entropy_profiles.append(entropies)
-            output_per_token_logprob_truncated.append(per_output_entropies)
             generation_info.append({
                 "prompt": prompt,
                 "output_text": all_output_texts,
                 "token_text": token_texts,
-                "logprobs": per_output_logprobs,
-                "logprobs_truncated": per_output_logprobs_truncated
+                "logprobs": per_token_logprobs,
+                "logprobs_truncated": per_token_logprobs_truncated
             })
         
         return {
-            "entropy_profiles": entropy_profiles, 
+            "output_entropy_truncated": output_entropy_truncated, 
             "output_per_token_logprob_truncated": output_per_token_logprob_truncated,
             "generation_info": generation_info
         }
@@ -146,13 +118,13 @@ class BranchingFactorPipeline:
 
     def compute_branching_factors(
         self,
-        entropy_profiles,
-        output_per_token_logprob_truncated,
+        entropy_truncated,
+        per_token_logprob_truncated,
         asymptotic_limit: int = 50,
     ) -> Dict[str, Any]:
         # Process entropy values (cumulative)
         output_token_entropies = []
-        for entropies_per_output in entropy_profiles:
+        for entropies_per_output in entropy_truncated:
             for entropy_list in entropies_per_output:
                 if len(entropy_list) > 0:
                     cumulative_entropies = np.cumsum(entropy_list)
@@ -160,7 +132,7 @@ class BranchingFactorPipeline:
 
         # Process loglik values
         output_token_logprobs = []
-        for instance in output_per_token_logprob_truncated:
+        for instance in per_token_logprob_truncated:
             for output_logprobs in instance:
                 if len(output_logprobs) > 0:
                     logprob_values = [
@@ -218,34 +190,31 @@ class BranchingFactorPipeline:
 
 
     def run_generation_and_bf(self, prompts: List[str]) -> Dict[str, Any]:
-        if self.llm is None:
-            self.setup_model()
-
         # Generate with vLLM
         outputs: list[RequestOutput] = self.generate_responses(
             prompts=prompts,
         )
 
         # Extract per-token entropy using logprobs
-        entropy_data = self.compute_entropy_profiles(
+        entropy_results = self.compute_per_token_entropy(
             outputs, 
             top_p=self.config.top_p
         )
 
         # Compute branching factor
         bf_results = self.compute_branching_factors(
-            entropy_profiles=entropy_data["entropy_profiles"], 
-            output_per_token_logprob_truncated=entropy_data["output_per_token_logprob_truncated"]
+            entropy_truncated=entropy_results["output_entropy_truncated"], 
+            per_token_logprob_truncated=entropy_results["output_per_token_logprob_truncated"]
         )
 
         complete_results = {
-            "model_name": self.model_name,
+            "model_name": self.config.model,
             "timestamp": datetime.now().isoformat(),
             "config": OmegaConf.to_container(OmegaConf.structured(self.config), resolve=True),
             "branching_factor_results": bf_results,
             "raw_data": {
                 "prompts": prompts,
-                "entropy_data": entropy_data,
+                "entropy_results": entropy_results,
             },
         }
 
@@ -260,7 +229,7 @@ class BranchingFactorPipeline:
     def save_results(self, results, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_short = self.model_name.split("/")[-1]
+        model_short = self.config.model.split("/")[-1]
 
         results_file = os.path.join(
             output_dir, f"bf_results_{model_short}_{timestamp}.json"
