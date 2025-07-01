@@ -24,15 +24,23 @@ RESULTS_DIR = Path(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(
 
 @dataclass
 class RunConfig:
+    """
+    From sec. 3:
+    
+    For our Forking Paths Analysis, we sample the k ≤ 10 most probable alternate tokens xt = w such
+    that the probability of each token w is at least 5%. When sampling batches at each token index and
+    alternate token, we collect S = 30 text samples.
+    """
+
     model: str = "meta-llama/Meta-Llama-3-8B-Instruct"
 
     # forking paths config
     num_outcome_samples: int = 128 # num generations to estimate the output set
-    num_samples: int = 16 # Resamples per alternative token
-    epsilon = 0.3         # Threshold for outcome deviation
+    num_samples: int = 4 # Resamples per alternative token
+    epsilon = 0.3        # Threshold for outcome deviation
 
     # vllm config
-    max_tokens: int = 512
+    max_tokens: int = 128
     temperature: float = 1.0
     top_p: float = 0.9
     min_p: float = 0.1
@@ -64,7 +72,7 @@ class ForkingPathsPipeline:
         )
         
 
-    def generate(self, prompts, n):
+    def generate(self, prompts, n) -> list[RequestOutput]:
         sampling_params = SamplingParams(
             n=n,
             temperature=self.config.temperature,
@@ -164,20 +172,33 @@ class ForkingPathsPipeline:
         o_t_w = defaultdict(dict)
         token_probs = []
 
-        # TODO: Collapse the double for loop into 1 vLLM call
-
+        # Create vLLM inputs
+        all_prompts = []
         for t in range(len(x_star)):
             token_prob_dict = logprobs[t]
             token_probs.append(token_prob_dict)
-
+            
             for w, p_w in token_prob_dict.items():
                 prefix = x_star[:t] + [w]
-                prompt = TokensPrompt(prompt_token_ids=prefix)
-                samples = self.sample_completions(prompt, self.config.num_samples)
-                outcomes = [self.outcome_vector(sample, outcome_choices) for sample in samples]
-                avg_outcome = np.mean(outcomes, axis=0)
-                o_t_w[t][w] = avg_outcome
+                all_prompts.append((t, w, TokensPrompt(prompt_token_ids=prefix)))
 
+        all_outputs: list[RequestOutput] = self.generate(
+            [p for _, _, p in all_prompts],
+            self.config.num_samples
+        )
+
+        # Collect results
+        sample_idx = 0
+        for (t, w, _), output in zip(all_prompts, all_outputs):
+            completion_texts: list[str] = [completion.text for completion in output.outputs]
+            outcomes = [self.outcome_vector(completion, outcome_choices) for completion in completion_texts]
+            avg_outcome = np.mean(outcomes, axis=0)
+            o_t_w[t][w] = avg_outcome
+            sample_idx += self.config.num_samples
+
+        # Calculate final distributions
+        for t in range(len(x_star)):
+            token_prob_dict = logprobs[t]
             base_token = x_star[t]
             dist_w = [token_prob_dict[w] * o_t_w[t][w] for w in token_prob_dict]
             o_t.append(np.sum(dist_w, axis=0))
