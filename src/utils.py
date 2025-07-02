@@ -1,11 +1,11 @@
 import logging
-import sys
+import logging.config
+import sys, os
 from omegaconf import OmegaConf
 
-def quiet_vllm_logger(level=logging.WARNING):
-    for name, logger in logging.root.manager.loggerDict.items():
-        if name.startswith("vllm"):
-            logging.getLogger(name).setLevel(level)
+def quiet_vllm_logger():
+    os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+    os.environ["VLLM_LOG_LEVEL"] = "WARNING"
 
 
 def apply_overrides(config):

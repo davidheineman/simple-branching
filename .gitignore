@@ -3,3 +3,4 @@ results
 build
 *.pyc
 INTERNAL.md
+*.ipynb
